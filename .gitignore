@@ -1,0 +1,7 @@
+# Optional cache directory
+.next/cache
+.next/server
+.next/static
+
+# Dependency directories
+node_modules
