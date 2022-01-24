@@ -1,41 +1,38 @@
 import { ethers } from 'ethers'
 import { create as ipfsHttpClient } from 'ipfs-http-client'
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useContext } from 'react'
 import axios from 'axios'
-import Web3Modal from "web3modal"
 import Image from 'next/image'
-import { useRouter } from 'next/router'
 import { initializeApp, getApps } from "firebase/app"
 import { getStorage, ref, listAll } from "firebase/storage";
 import { getFirestore, collection, addDoc, getDocs, doc, updateDoc } from "firebase/firestore";
-
-const client = ipfsHttpClient('https://ipfs.infura.io:5001/api/v0')
-import {
-  nftaddress, nftmarketaddress
-} from '../config'
-
+import config from '../config.json'
 import NFT from '../artifacts/contracts/NFT.sol/NFT.json'
 import Market from '../artifacts/contracts/Market.sol/NFTMarket.json'
+import { UserContext } from './_app'
+
+const tokenSymbol = config['token']['symbol']
+const tokenWatchAssetUrl = config['token']['wallet_watchAsset']['url']
+const nftaddress = config['deployed']['nftaddress']
+const nftmarketaddress = config['deployed']['nftmarketaddress']
+const envChainName = config['deployed']['envChain']['name']
+const envChainId = config['deployed']['envChain']['id']
+const client = ipfsHttpClient('https://ipfs.infura.io:5001/api/v0')
 
 export default function Membership() {
-  const [errorMessage, setErrorMessage] = useState('')
-  const [modalPendingMessage, setModalPendingMessage] = useState('')
-  const [address, setAddress] = useState('')
+  const [info, updateInfo] = useState({})
   const [nfts, setNfts] = useState([])
-  const router = useRouter()
 
   function handleAccountsChanged(accounts) {
     if (accounts.length === 0) {
       // MetaMask is locked or the user has not connected any accounts
-      console.log('Please connect to MetaMask.');
-    } else if (accounts[0] !== address) {
-      setAddress(accounts[0]);
+      updateInfo({message: 'Please connect to MetaMask.'})
     }
   }
 
   async function register(nft) {
     if (nft.tokenId === '-') {
-      return setErrorMessage("Unable to connect to network. Please check MetaMask and try again.")
+      return updateInfo({message: "Unable to connect to network. Please check MetaMask and try again."})
     }
     if (window.ethereum) {
       try {
@@ -48,76 +45,63 @@ export default function Membership() {
               address: nft.nftContract,
               symbol: nft.symbol,
               decimals: 0,
-              image: "https://ipfs.infura.io/ipfs/QmdkuYAXeHW5biytdw5Ff626AkdsmocRW4vaGYTMNK6qWv",
+              image: tokenWatchAssetUrl,
               abi: NFT.abi
             }
           }
         })
         if (wasAdded) {
-          console.log('Thanks for your interest!')
-        } else {
-          console.log('Your loss!')
+          updateInfo({message: 'Thanks for your interest!'})
         }
       } catch(err) {
         if (err.code === 4001) {
           // EIP-1193 userRejectedRequest error
           // If this happens, the user rejected the connection request.
-          console.log('Please connect to MetaMask.');
+          updateInfo({message: 'Please connect to MetaMask.'})
         } else {
-          console.error(err.message || err);
+          updateInfo({message: (err.message || err)})
         }
       }
     } else {
-      setErrorMessage("Unable to process without a crypto wallet. Please refresh screen to try again.")
+      updateInfo({message: "Unable to process without a crypto wallet. Please refresh screen to try again."})
     }
   }
 
   async function mint(nft) {
     if (nft.tokenId === '-') {
-      return setErrorMessage("Unable to connect to network. Please check MetaMask and try again.")
+      return updateInfo({message: "Unable to connect to network. Please check MetaMask and try again."})
     }
     if (window.ethereum) {
-      setModalPendingMessage("Please wait. Smart contract is processing.")
+      updateInfo({showModal: true, message: 'Please wait. Smart contract is processing.'})
       try {
-        const web3Modal = new Web3Modal()
-        let connection = await web3Modal.connect()
-        const provider = new ethers.providers.Web3Provider(connection)
+        const provider = new ethers.providers.Web3Provider(window.ethereum)
         const signer = provider.getSigner()
 
         let market = new ethers.Contract(nftmarketaddress, Market.abi, signer)
-        let biddingPrice = ethers.utils.parseUnits(nft.bidPrice.toString(), 'ether')
-        let transaction = await market.createMarketSale(nftaddress, nft.itemId, {value: biddingPrice})
+        let price = ethers.utils.parseUnits(nft.price.toString(), 'ether')
+        let transaction = await market.createMarketSale(nft.nftContract, nft.itemId, {value: price})
         let tx = await transaction.wait()
-        window.location.reload()
       } catch (error) {
         if (error.data) {
-          setErrorMessage(`Crypto Wallet Error: ${error.data.message}`)
+          updateInfo({showModal: false, message: `Crypto Wallet Error: ${error.data.message}`})
         } else {
-          setErrorMessage(`Crypto Wallet Error: ${error.message || error}`)
+          updateInfo({showModal: false, message: `Crypto Wallet Error: ${error.message || error}`})
         }
-      } finally {
-        setModalPendingMessage("")
       }
     } else {
-      setErrorMessage("Non-Ethereum browser detected. You should consider installing MetaMask.")
+      updateInfo({message: "Non-Ethereum browser detected. You should consider installing MetaMask."})
     }
   }
 
-  async function loadNfts() {
+  async function loadNfts(nft, market, envChainId) {
     let items = []
+    updateInfo({showModal: true, message: "Please wait. Smart contract is processing."})
     try {
-      const web3Modal = new Web3Modal()
-      const connection = await web3Modal.connect()
-      const provider = new ethers.providers.Web3Provider(connection)
-      const signer = provider.getSigner()
-
-      let nft = new ethers.Contract(nftaddress, NFT.abi, signer)
-      let market = new ethers.Contract(nftmarketaddress, Market.abi, signer)
+      await _ethAccountsRequest()
       let marketItems = await market.fetchMarketItems()
-
       items = await Promise.all(marketItems.map(async i => {
         const tokenUri = await nft.tokenURI(i.tokenId)
-        let bidPrice = ethers.utils.formatUnits(i.price.toString(), 'ether')
+        let price = ethers.utils.formatUnits(i.price.toString(), 'ether')
         let item = {
           tokenId: i.tokenId.toNumber(),
           itemId: i.itemId.toNumber(),
@@ -125,7 +109,7 @@ export default function Membership() {
           image: '/pay-a-vegan.mp4',
           nftContract: i.nftContract,
           decimals: 0,
-          bidPrice,
+          price,
           tokenUri
         }
         return item
@@ -139,12 +123,12 @@ export default function Membership() {
           image: '/pay-a-vegan.mp4',
           nftContract: 0,
           decimals: 0,
-          bidPrice: 0,
+          price: 0,
           tokenUri: ''
         }]
       }
     } catch(ex) {
-      console.error(ex)
+      updateInfo({message: ex.message})
       //dummy item for display when no nft is found
       items = [{
         tokenId: '-',
@@ -153,17 +137,40 @@ export default function Membership() {
         image: '/pay-a-vegan.mp4',
         nftContract: 0,
         decimals: 0,
-        bidPrice: 0,
+        price: 0,
         tokenUri: ''
       }]
     } finally {
       setNfts(items)
+      updateInfo({showModal: false, message: ""})
     }
   }
 
   useEffect(() => {
     if (window.ethereum) {
-      loadNfts()
+      const provider = new ethers.providers.Web3Provider(window.ethereum)
+      const signer = provider.getSigner()
+      let nft = new ethers.Contract(nftaddress, NFT.abi, signer)
+      let market = new ethers.Contract(nftmarketaddress, Market.abi, signer)
+
+      window.ethereum.on('chainChanged', (chainId) => {
+        // Handle the new chain.
+        // Correctly handling chain changes can be complicated.
+        // We recommend reloading the page unless you have good reason not to.
+        window.location.reload();
+      })
+
+      window.ethereum.on('accountsChanged', handleAccountsChanged);
+
+      market.on("MarketItemCreated", (itemId, nftContract, tokenId, seller, owner, price) => {
+        loadNfts(nft, market, envChainId)
+      })
+
+      market.on("MarketItemSold", (itemId, nftContract, tokenId, owner, seller, price) => {
+        loadNfts(nft, market, envChainId)
+      })
+
+      loadNfts(nft, market, envChainId)
     } else {
       //dummy item for display with non-ethereum browser
       let item = {
@@ -173,46 +180,134 @@ export default function Membership() {
         image: '/pay-a-vegan.mp4',
         nftContract: 0,
         decimals: 0,
-        bidPrice: 0,
+        price: 0,
         tokenUri: ''
       }
       setNfts([item])
+      updateInfo({message: "Non-Ethereum browser detected. You should consider installing MetaMask."})
     }
     return function cleanup() {
       //mounted = false
     }
   }, [])
 
-  useEffect(() => {
+  async function _ethRegister() {
     if (window.ethereum) {
-      window.ethereum
-        .request({ method: 'eth_requestAccounts' })
-        .then(handleAccountsChanged)
-        .catch((err) => {
-          if (err.code === 4001) {
-            // EIP-1193 userRejectedRequest error
-            // If this happens, the user rejected the connection request.
-            console.log('Please connect to MetaMask.');
-          } else {
-            console.error(err);
+      try {
+        // wasAdded is a boolean. Like any RPC method, an error may be thrown.
+        let wasAdded = await window.ethereum.request({
+          method: 'wallet_watchAsset',
+          params: {
+            type: 'ERC20', // Initially only supports ERC20, but eventually more!
+            options: {
+              address: nftaddress,
+              symbol: tokenSymbol,
+              decimals: 0,
+              image: tokenWatchAssetUrl,
+              abi: NFT.abi
+            }
           }
-        });
-      window.ethereum.on('accountsChanged', handleAccountsChanged);
-      window.ethereum.on('chainChanged', (chainId) => {
-        window.location.reload()
-      })
+        })
+        if (wasAdded) {
+          updateInfo({message: "Thanks for your interest!"})
+        }
+      } catch(err) {
+        if (err.code === 4001) {
+          // EIP-1193 userRejectedRequest error
+          // If this happens, the user rejected the connection request.
+          updateInfo({message: "Please connect to MetaMask."})
+        } else {
+          updateInfo({message: err.message || err})
+        }
+      }
     } else {
-      setAddress("Non-Ethereum browser detected. You should consider installing MetaMask.")
+      updateInfo({message: "Unable to process without a crypto wallet. Please refresh screen to try again."})
     }
-    return function cleanup() {
-      //mounted = false
-    }
-  }, [])
+  }
 
-  if (modalPendingMessage) return (
-    <div className="p-4">
-      <p>{modalPendingMessage}</p>
-      <div className="loader"></div>
+  async function _ethAccountsRequest() {
+    if (window.ethereum) {
+      let result = await Promise.all([
+        window.ethereum.request({ method: 'eth_requestAccounts' }),
+        window.ethereum.request({ method: 'eth_chainId' })
+      ]).catch((error) => {
+        if (error.code === 4001) {
+          throw {title: 'Error - Please check your wallet and try again', message: 'Connection request has been rejected. '}
+        } else if (error.code === -32002) {
+          throw {title: 'Error - Please check your wallet and try again', message: error.message}
+        } else {
+          throw {title: 'Error - Please check your wallet and try again', message: error.message}
+        }
+      })
+      if (result) {
+        let [accounts, chainId] = result
+        if (accounts.length === 0) {
+          throw {title: 'Error - Please check your wallet and try again', message: `MetaMask is locked or the user has not connected any accounts`}
+        }
+        if (chainId !== envChainId) {
+          throw {title: 'Error - Please check your wallet and try again', message: `Error - Is your wallet connected to ${envChainName}?`}
+        }
+        updateInfo({message: "Metamask wallet adapter is connected and ready to use."})
+      }
+      return result
+    } else {
+      throw {title: 'Error - Non-Ethereum browser detected.', message: 'You should consider installing MetaMask'}
+    }
+  }
+
+  async function _ethWalletRequestPermissions() {
+    if (window.ethereum) {
+      try {
+        let permissions = await window.ethereum.request({
+          method: "wallet_requestPermissions",
+          params: [
+            {
+              eth_accounts: {}
+            }
+          ]
+        })
+        const accountsPermission = permissions.find(
+          (permission) => permission.parentCapability === 'eth_accounts'
+        )
+        if (accountsPermission) {
+          updateInfo({message: 'eth_accounts permission successfully requested!'})
+        }
+      } catch(error) {
+        if (error.code === 4001) {
+          throw {title: 'Error - Please check your wallet and try again', message: 'Connection request has been rejected. '}
+        } else if (error.code === -32601) {
+          throw {title: 'Error - Please check your wallet and try again', message: 'Permissions needed to continue.'}
+        } else if (error.code === -32002) {
+          throw {title: 'Error - Please check your wallet and try again', message: error.message}
+        } else {
+          throw {title: 'Error - Please check your wallet and try again', message: error.message}
+        }
+      }
+    } else {
+      throw {title: 'Error - Non-Ethereum browser detected.', message: 'You should consider installing MetaMask'}
+    }
+  }
+
+  if (info.showModal) return (
+    <div className="modal modal-sheet position-static d-block bg-secondary py-5" tabIndex="-1" role="dialog" id="modalSheet">
+      <div className="modal-dialog" role="document">
+        <div className="modal-content rounded-6 shadow">
+          <div className="modal-header border-bottom-0">
+            <h5 className="modal-title">{info.title}</h5>
+            <button type="button" className="btn-close" data-bs-dismiss="modal" aria-label="Close" onClick={() => updateInfo({showModal: false})}></button>
+          </div>
+          <div className="modal-body py-0">
+            <p>{info.message}</p>
+
+            {info.loading && <div className="loader"></div>}
+          </div>
+          <div className="modal-footer flex-column border-top-0">
+            {info.btn &&
+              <button type="button" className="btn btn-lg btn-primary w-100 mx-0 mb-2">{info.btn}</button>}
+            <button type="button" className="btn btn-lg btn-light w-100 mx-0" onClick={() => updateInfo({showModal: false})}>Close</button>
+          </div>
+        </div>
+      </div>
     </div>
   )
   return (
@@ -223,7 +318,7 @@ export default function Membership() {
             <div className="col-lg-6 col-md-8 mx-auto">
               <h1 className="fw-light">WELCOME TO</h1>
               <h1 className="fw-light">PAY-A-VEGAN NFT CLUB</h1>
-              <p>{errorMessage}</p>
+              <p>{info.message}</p>
             </div>
           </div>
         </section>
@@ -239,10 +334,10 @@ export default function Membership() {
             {nfts.map((nft, i) => (
               <div key={i} className="col">
                 <div className="card shadow-sm">
-                    <video key={i} autoPlay muted loop alt="NFT series" width="100%" height="100%"
-                       src={nft.image} poster={nft.image} />
+                  <video key={i} autoPlay muted loop alt="NFT series" width="100%" height="100%"
+                     src={nft.image} poster={nft.image} />
                   <div className="card-body">
-                    <p className="card-text">{nft.bidPrice} ETH</p>
+                    <p className="card-text">{nft.price} ETH</p>
                     <div className="d-flex justify-content-between align-items-center">
                       <div className="btn-group">
                         <button type="button" className="btn btn-sm btn-secondary" onClick={() => register(nft)}>Register</button>
